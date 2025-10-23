@@ -8,6 +8,9 @@ from database import Database
 from datetime import datetime
 import asyncio
 import re
+import signal
+import sys
+from aiohttp import web
 
 load_dotenv()
 
@@ -23,6 +26,7 @@ REQUEST_CHANNEL_ID = int(os.getenv('REQUEST_CHANNEL_ID'))
 LOG_CHANNEL_ID = int(os.getenv('LOG_CHANNEL_ID'))
 PROOF_CHANNEL_ID = int(os.getenv('PROOF_CHANNEL_ID'))
 TICKET_CATEGORY_ID = int(os.getenv('TICKET_CATEGORY_ID'))
+PORT = int(os.getenv('PORT', 8080))
 
 TIER_ROLES = {
     'trial': int(os.getenv('TRIAL_MIDDLEMAN_ROLE_ID')),
@@ -102,6 +106,51 @@ def is_admin(member: discord.Member) -> bool:
     return member.guild_permissions.administrator
 
 
+# Health check endpoint for Render
+async def health_check(request):
+    """Health check endpoint for UptimeRobot and Render"""
+    try:
+        db_healthy = await db.health_check()
+        bot_ready = bot.is_ready()
+        
+        status = {
+            'status': 'healthy' if (db_healthy and bot_ready) else 'degraded',
+            'bot_ready': bot_ready,
+            'database': 'connected' if db_healthy else 'disconnected',
+            'guilds': len(bot.guilds),
+            'uptime': str(datetime.utcnow() - bot.start_time) if hasattr(bot, 'start_time') else 'unknown'
+        }
+        
+        return web.json_response(status)
+    except Exception as e:
+        logger.error(f"Health check error: {e}")
+        return web.json_response({'status': 'unhealthy', 'error': str(e)}, status=503)
+
+
+async def start_health_server():
+    """Start health check HTTP server for Render"""
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    app.router.add_get('/health', health_check)
+    app.router.add_get('/ping', health_check)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+    logger.info(f"Health check server started on port {PORT}")
+
+
+def signal_handler(sig, frame):
+    """Handle shutdown signals gracefully"""
+    logger.info('Received shutdown signal, closing bot...')
+    sys.exit(0)
+
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+
+
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
@@ -119,6 +168,7 @@ async def on_message(message: discord.Message):
 
 @bot.event
 async def on_ready():
+    bot.start_time = datetime.utcnow()
     logger.info(f'Logged in as {bot.user}')
     logger.info(f'Bot ID: {bot.user.id}')
     logger.info(f'Connected to {len(bot.guilds)} guild(s)')
@@ -557,4 +607,17 @@ async def help_command(interaction: discord.Interaction):
 
 
 if __name__ == "__main__":
-    bot.run(TOKEN)
+    async def main():
+        async with bot:
+            # Start health check server for Render
+            await start_health_server()
+            # Start the bot
+            await bot.start(TOKEN)
+    
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+        sys.exit(1)
