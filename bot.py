@@ -72,6 +72,66 @@ _role_cache = {}
 _member_cache = {}
 
 
+# ==================== RATE LIMIT HANDLER ====================
+async def safe_discord_request(coro, max_retries=3, base_delay=2):
+    """
+    Safely execute a Discord API request with automatic retry on rate limits
+    """
+    for attempt in range(max_retries):
+        try:
+            return await coro
+        except discord.HTTPException as e:
+            if e.status == 429:
+                retry_after = float(e.response.headers.get('Retry-After', base_delay * (2 ** attempt)))
+                logger.warning(f"Rate limited. Retrying after {retry_after:.2f}s... (Attempt {attempt + 1}/{max_retries})")
+                await asyncio.sleep(retry_after)
+                if attempt == max_retries - 1:
+                    raise
+            elif e.status == 403:
+                logger.error(f"Permission denied: {e}")
+                raise
+            elif e.status >= 500:
+                wait_time = base_delay * (2 ** attempt)
+                logger.warning(f"Server error {e.status}. Retrying after {wait_time}s...")
+                await asyncio.sleep(wait_time)
+                if attempt == max_retries - 1:
+                    raise
+            else:
+                raise
+        except asyncio.TimeoutError:
+            if attempt < max_retries - 1:
+                wait_time = base_delay * (2 ** attempt)
+                logger.warning(f"Request timeout. Retrying after {wait_time}s...")
+                await asyncio.sleep(wait_time)
+            else:
+                raise
+    return None
+
+
+async def safe_send_message(messageable, *args, **kwargs):
+    """Safely send a message with rate limit handling"""
+    return await safe_discord_request(messageable.send(*args, **kwargs))
+
+
+async def safe_interaction_response(interaction, *args, **kwargs):
+    """Safely respond to an interaction with rate limit handling"""
+    if interaction.response.is_done():
+        return await safe_discord_request(interaction.followup.send(*args, **kwargs))
+    return await safe_discord_request(interaction.response.send_message(*args, **kwargs))
+
+
+async def safe_interaction_defer(interaction, **kwargs):
+    """Safely defer an interaction with rate limit handling"""
+    if not interaction.response.is_done():
+        return await safe_discord_request(interaction.response.defer(**kwargs))
+
+
+async def safe_interaction_followup(interaction, *args, **kwargs):
+    """Safely send a followup message with rate limit handling"""
+    return await safe_discord_request(interaction.followup.send(*args, **kwargs))
+# ==================== END RATE LIMIT HANDLER ====================
+
+
 async def get_member_cached(guild, user_id):
     cache_key = f"{guild.id}_{user_id}"
     if cache_key in _member_cache:
@@ -106,7 +166,6 @@ def is_admin(member: discord.Member) -> bool:
     return member.guild_permissions.administrator
 
 
-# Health check endpoint for Render
 async def health_check(request):
     """Health check endpoint for UptimeRobot and Render"""
     try:
@@ -160,9 +219,11 @@ async def on_message(message: discord.Message):
             if URL_PATTERN.search(message.content):
                 try:
                     await message.delete()
-                    await message.channel.send(f"❌ {message.author.mention} Only middlemen can send links in this ticket.", delete_after=5)
+                    await safe_send_message(message.channel, f"❌ {message.author.mention} Only middlemen can send links in this ticket.", delete_after=5)
                 except discord.Forbidden:
                     logger.error(f"Missing permissions to delete message in {message.channel.name}")
+                except Exception as e:
+                    logger.error(f"Error handling URL in message: {e}")
     await bot.process_commands(message)
 
 
@@ -231,9 +292,11 @@ class TradeDetailsModal(discord.ui.Modal, title="Fill out the Format"):
     async def on_submit(self, interaction: discord.Interaction):
         has_duplicate = await db.check_duplicate_ticket(interaction.user.id, str(self.trader.value), self.tier)
         if has_duplicate:
-            await interaction.response.send_message("❌ You already have an open ticket for the same trader and tier. Please wait for your current ticket to be processed.", ephemeral=True)
+            await safe_interaction_response(interaction, "❌ You already have an open ticket for the same trader and tier. Please wait for your current ticket to be processed.", ephemeral=True)
             return
-        await interaction.response.defer(ephemeral=True)
+        
+        await safe_interaction_defer(interaction, ephemeral=True)
+        
         try:
             guild = interaction.guild
             category = guild.get_channel(TICKET_CATEGORY_ID)
@@ -255,7 +318,9 @@ class TradeDetailsModal(discord.ui.Modal, title="Fill out the Format"):
                     role = guild.get_role(role_id)
                     if role:
                         overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
-            channel = await category.create_text_channel(name=f"mm-{self.tier}-{ticket_counter}", overwrites=overwrites)
+            
+            channel = await safe_discord_request(category.create_text_channel(name=f"mm-{self.tier}-{ticket_counter}", overwrites=overwrites))
+            
             ticket_id = await db.create_ticket(channel.id, interaction.user.id, str(self.trader.value), str(self.giving.value), str(self.receiving.value), self.tier)
             embed = discord.Embed(title="Middleman Request", description=f"✅ By creating a ticket you have read & agreed to our [terms](https://discord.com/channels/{GUILD_ID})", color=discord.Color.blue(), timestamp=datetime.utcnow())
             embed.add_field(name="Requester", value=interaction.user.mention, inline=True)
@@ -270,9 +335,12 @@ class TradeDetailsModal(discord.ui.Modal, title="Fill out the Format"):
             role_id = TIER_ROLES.get(self.tier)
             role_mention = f"<@&{role_id}>" if role_id else ""
             mm_note = "mm use only:\n┕ want more info on your mm? run $mminfo (mm)"
-            await channel.send(content=f"{role_mention}\n\n{mm_note}", embed=embed, view=view)
+            
+            await safe_send_message(channel, content=f"{role_mention}\n\n{mm_note}", embed=embed, view=view)
+            
             vouch_embed = discord.Embed(description="❗ Vouching your middleman after the trade is required ❗", color=discord.Color.red())
-            await channel.send(embed=vouch_embed)
+            await safe_send_message(channel, embed=vouch_embed)
+            
             asyncio.create_task(db.log_action(ticket_id, "created", interaction.user.id))
             log_channel = guild.get_channel(LOG_CHANNEL_ID)
             if log_channel:
@@ -281,11 +349,15 @@ class TradeDetailsModal(discord.ui.Modal, title="Fill out the Format"):
                 log_embed.add_field(name="Channel", value=channel.mention, inline=True)
                 log_embed.add_field(name="Requester", value=interaction.user.mention, inline=True)
                 log_embed.add_field(name="Tier", value=TIER_NAMES.get(self.tier), inline=True)
-                asyncio.create_task(log_channel.send(embed=log_embed))
-            await interaction.followup.send(f"✅ Ticket created! Please head to {channel.mention}", ephemeral=True)
+                asyncio.create_task(safe_send_message(log_channel, embed=log_embed))
+            
+            await safe_interaction_followup(interaction, f"✅ Ticket created! Please head to {channel.mention}", ephemeral=True)
         except Exception as e:
             logger.error(f"Error creating ticket: {e}")
-            await interaction.followup.send("❌ An error occurred while creating your ticket. Please contact an administrator.", ephemeral=True)
+            try:
+                await safe_interaction_followup(interaction, "❌ An error occurred while creating your ticket. Please contact an administrator.", ephemeral=True)
+            except:
+                pass
 
 
 class TicketActionsView(discord.ui.View):
@@ -296,7 +368,7 @@ class TicketActionsView(discord.ui.View):
     async def claim_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         ticket = await db.get_ticket_by_channel(interaction.channel.id)
         if not ticket:
-            await interaction.response.send_message("❌ Ticket not found.", ephemeral=True)
+            await safe_interaction_response(interaction, "❌ Ticket not found.", ephemeral=True)
             return
         has_permission = False
         tier_hierarchy = ['trial', 'middleman', 'pro', 'head', 'owner']
@@ -309,13 +381,14 @@ class TicketActionsView(discord.ui.View):
                 break
         if not has_permission:
             required_tier = TIER_NAMES.get(ticket['tier'])
-            await interaction.response.send_message(f"❌ You need {required_tier} role or higher to claim this ticket.\nThis ticket requires: {TIER_LIMITS.get(ticket['tier'])}", ephemeral=True)
+            await safe_interaction_response(interaction, f"❌ You need {required_tier} role or higher to claim this ticket.\nThis ticket requires: {TIER_LIMITS.get(ticket['tier'])}", ephemeral=True)
             return
         if ticket['claimed_by']:
             claimer = await get_member_cached(interaction.guild, ticket['claimed_by'])
             claimer_mention = claimer.mention if claimer else f"<@{ticket['claimed_by']}>"
-            await interaction.response.send_message(f"❌ This ticket has already been claimed by {claimer_mention}", ephemeral=True)
+            await safe_interaction_response(interaction, f"❌ This ticket has already been claimed by {claimer_mention}", ephemeral=True)
             return
+        
         await db.claim_ticket(interaction.channel.id, interaction.user.id)
         claim_embed = discord.Embed(description=f"✅ @{interaction.user.name} will be your middleman", color=discord.Color.green())
         requester = await get_member_cached(interaction.guild, ticket['requester_id'])
@@ -324,12 +397,15 @@ class TicketActionsView(discord.ui.View):
         claim_embed.add_field(name="Participants", value=f"{requester_mention} {trader_text}", inline=False)
         if ticket['tier'] == 'owner':
             claim_embed.add_field(name="💰 Fee Payment Required", value="Please ensure the middleman fee is paid before proceeding with the trade.", inline=False)
-        await interaction.response.send_message(embed=claim_embed)
-        message = await interaction.original_response()
+        
+        await safe_interaction_response(interaction, embed=claim_embed)
+        
         try:
+            message = await interaction.original_response()
             await message.pin()
-        except discord.HTTPException:
+        except:
             pass
+        
         asyncio.create_task(db.log_action(ticket['ticket_id'], "claimed", interaction.user.id))
         log_channel = interaction.guild.get_channel(LOG_CHANNEL_ID)
         if log_channel:
@@ -337,7 +413,7 @@ class TicketActionsView(discord.ui.View):
             log_embed.add_field(name="Ticket", value=interaction.channel.mention, inline=True)
             log_embed.add_field(name="Claimed by", value=interaction.user.mention, inline=True)
             log_embed.add_field(name="Tier", value=TIER_NAMES.get(ticket['tier']), inline=True)
-            asyncio.create_task(log_channel.send(embed=log_embed))
+            asyncio.create_task(safe_send_message(log_channel, embed=log_embed))
 
 
 class CreateTicketView(discord.ui.View):
@@ -347,19 +423,21 @@ class CreateTicketView(discord.ui.View):
     @discord.ui.button(label="Create Middleman Ticket", style=discord.ButtonStyle.primary, custom_id="create_ticket_button")
     async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         view = TierSelectView()
-        await interaction.response.send_message("Please select the middleman tier for your trade:", view=view, ephemeral=True)
+        await safe_interaction_response(interaction, "Please select the middleman tier for your trade:", view=view, ephemeral=True)
 
 
 @bot.tree.command(name="setup", description="Setup the middleman request button (Admin only)")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def setup(interaction: discord.Interaction):
     if not is_admin(interaction.user):
-        await interaction.response.send_message("❌ You need Administrator permissions to use this command.", ephemeral=True)
+        await safe_interaction_response(interaction, "❌ You need Administrator permissions to use this command.", ephemeral=True)
         return
+    
     embed = discord.Embed(title="🛡 Middleman Services", description=("Click the button below to request a middleman for your trade.\n\nAvailable Tiers:\n🌱 Trial Middleman - Up to 2k Robux (No Fee)\n💼 Middleman - Up to 6k Robux (No Fee)\n⚡ Pro Middleman - Up to 10k Robux (No Fee)\n👑 Head Middleman - Up to 20k Robux (No Fee)\n💎 Owner - 20k+ Robux (Fee: 100 Robux or 20M Brainrot)\n\nSelect the appropriate tier based on your trade value."), color=discord.Color.blue())
     view = CreateTicketView()
-    await interaction.channel.send(embed=embed, view=view)
-    await interaction.response.send_message("✅ Setup complete!", ephemeral=True)
+    
+    await safe_send_message(interaction.channel, embed=embed, view=view)
+    await safe_interaction_response(interaction, "✅ Setup complete!", ephemeral=True)
 
 
 @bot.tree.command(name="proof", description="Mark trade as complete and send proof (Middleman only)")
@@ -367,16 +445,18 @@ async def setup(interaction: discord.Interaction):
 async def proof(interaction: discord.Interaction):
     ticket = await db.get_ticket_by_channel(interaction.channel.id)
     if not ticket:
-        await interaction.response.send_message("❌ This command can only be used in ticket channels.", ephemeral=True)
+        await safe_interaction_response(interaction, "❌ This command can only be used in ticket channels.", ephemeral=True)
         return
     if not has_middleman_role(interaction.user):
-        await interaction.response.send_message("❌ Only middlemen can use this command.", ephemeral=True)
+        await safe_interaction_response(interaction, "❌ Only middlemen can use this command.", ephemeral=True)
         return
-    await interaction.response.defer(ephemeral=True)
+    
+    await safe_interaction_defer(interaction, ephemeral=True)
+    
     try:
         proof_channel = interaction.guild.get_channel(PROOF_CHANNEL_ID)
         if not proof_channel:
-            await interaction.followup.send("❌ Proof channel not found. Please contact an administrator.", ephemeral=True)
+            await safe_interaction_followup(interaction, "❌ Proof channel not found. Please contact an administrator.", ephemeral=True)
             return
         requester = await get_member_cached(interaction.guild, ticket['requester_id'])
         requester_mention = requester.mention if requester else f"<@{ticket['requester_id']}>"
@@ -390,14 +470,18 @@ async def proof(interaction: discord.Interaction):
         proof_embed.add_field(name=f"{requester_name} gave", value=f"{ticket['giving']}", inline=False)
         proof_embed.add_field(name="Other trader gave", value=f"{ticket['receiving']}", inline=False)
         proof_embed.set_footer(text=f"Ticket #{ticket['ticket_id']}")
-        await proof_channel.send(embed=proof_embed)
+        
+        await safe_send_message(proof_channel, embed=proof_embed)
+        
         asyncio.create_task(db.log_action(ticket['ticket_id'], "proof_submitted", interaction.user.id))
-        await interaction.followup.send("✅ Trade proof has been sent to the proof channel!", ephemeral=True)
+        
+        await safe_interaction_followup(interaction, "✅ Trade proof has been sent to the proof channel!", ephemeral=True)
+        
         success_embed = discord.Embed(description=f"✅ Trade marked as complete by {interaction.user.mention}\nProof has been submitted!", color=discord.Color.green())
-        await interaction.channel.send(embed=success_embed)
+        await safe_send_message(interaction.channel, embed=success_embed)
     except Exception as e:
         logger.error(f"Error submitting proof: {e}")
-        await interaction.followup.send("❌ An error occurred while submitting proof.", ephemeral=True)
+        await safe_interaction_followup(interaction, "❌ An error occurred while submitting proof.", ephemeral=True)
 
 
 @bot.tree.command(name="close", description="Close the current ticket instantly (Middleman only)")
@@ -405,12 +489,14 @@ async def proof(interaction: discord.Interaction):
 async def close_ticket_cmd(interaction: discord.Interaction):
     ticket = await db.get_ticket_by_channel(interaction.channel.id)
     if not ticket:
-        await interaction.response.send_message("❌ This command can only be used in ticket channels.", ephemeral=True)
+        await safe_interaction_response(interaction, "❌ This command can only be used in ticket channels.", ephemeral=True)
         return
     if not has_middleman_role(interaction.user):
-        await interaction.response.send_message("❌ Only middlemen can close tickets.", ephemeral=True)
+        await safe_interaction_response(interaction, "❌ Only middlemen can close tickets.", ephemeral=True)
         return
-    await interaction.response.send_message("🔒 Closing ticket now...", ephemeral=True)
+    
+    await safe_interaction_response(interaction, "🔒 Closing ticket now...", ephemeral=True)
+    
     await db.close_ticket(interaction.channel.id)
     asyncio.create_task(db.log_action(ticket['ticket_id'], "closed", interaction.user.id))
     log_channel = interaction.guild.get_channel(LOG_CHANNEL_ID)
@@ -418,9 +504,10 @@ async def close_ticket_cmd(interaction: discord.Interaction):
         log_embed = discord.Embed(title="🔒 Ticket Closed", color=discord.Color.orange(), timestamp=datetime.utcnow())
         log_embed.add_field(name="Ticket", value=interaction.channel.name, inline=True)
         log_embed.add_field(name="Closed by", value=interaction.user.mention, inline=True)
-        asyncio.create_task(log_channel.send(embed=log_embed))
+        asyncio.create_task(safe_send_message(log_channel, embed=log_embed))
+    
     await asyncio.sleep(1)
-    await interaction.channel.delete(reason=f"Ticket closed by {interaction.user}")
+    await safe_discord_request(interaction.channel.delete(reason=f"Ticket closed by {interaction.user}"))
 
 
 @bot.tree.command(name="add", description="Add a user to the ticket")
@@ -429,7 +516,7 @@ async def close_ticket_cmd(interaction: discord.Interaction):
 async def add_user(interaction: discord.Interaction, user: discord.Member):
     ticket = await db.get_ticket_by_channel(interaction.channel.id)
     if not ticket:
-        await interaction.response.send_message("❌ This command can only be used in ticket channels.", ephemeral=True)
+        await safe_interaction_response(interaction, "❌ This command can only be used in ticket channels.", ephemeral=True)
         return
     has_permission = False
     if ticket['claimed_by'] == interaction.user.id:
@@ -439,26 +526,26 @@ async def add_user(interaction: discord.Interaction, user: discord.Member):
     elif has_middleman_role(interaction.user):
         has_permission = True
     if not has_permission:
-        await interaction.response.send_message("❌ You don't have permission to add users to this ticket.", ephemeral=True)
+        await safe_interaction_response(interaction, "❌ You don't have permission to add users to this ticket.", ephemeral=True)
         return
     if interaction.channel.permissions_for(user).view_channel:
-        await interaction.response.send_message(f"❌ {user.mention} already has access to this ticket.", ephemeral=True)
+        await safe_interaction_response(interaction, f"❌ {user.mention} already has access to this ticket.", ephemeral=True)
         return
     try:
-        await interaction.channel.set_permissions(user, view_channel=True, send_messages=True, read_message_history=True)
+        await safe_discord_request(interaction.channel.set_permissions(user, view_channel=True, send_messages=True, read_message_history=True))
         asyncio.create_task(db.log_action(ticket['ticket_id'], f"user_added:{user.id}", interaction.user.id))
         embed = discord.Embed(description=f"✅ {user.mention} has been added to the ticket by {interaction.user.mention}", color=discord.Color.green())
-        await interaction.response.send_message(embed=embed)
+        await safe_interaction_response(interaction, embed=embed)
         log_channel = interaction.guild.get_channel(LOG_CHANNEL_ID)
         if log_channel:
             log_embed = discord.Embed(title="➕ User Added to Ticket", color=discord.Color.blue(), timestamp=datetime.utcnow())
             log_embed.add_field(name="Ticket", value=interaction.channel.mention, inline=True)
             log_embed.add_field(name="Added User", value=user.mention, inline=True)
             log_embed.add_field(name="Added By", value=interaction.user.mention, inline=True)
-            asyncio.create_task(log_channel.send(embed=log_embed))
+            asyncio.create_task(safe_send_message(log_channel, embed=log_embed))
     except Exception as e:
         logger.error(f"Error adding user to ticket: {e}")
-        await interaction.response.send_message("❌ An error occurred while adding the user.", ephemeral=True)
+        await safe_interaction_response(interaction, "❌ An error occurred while adding the user.", ephemeral=True)
 
 
 @bot.tree.command(name="remove", description="Remove a user from the ticket")
@@ -467,7 +554,7 @@ async def add_user(interaction: discord.Interaction, user: discord.Member):
 async def remove_user(interaction: discord.Interaction, user: discord.Member):
     ticket = await db.get_ticket_by_channel(interaction.channel.id)
     if not ticket:
-        await interaction.response.send_message("❌ This command can only be used in ticket channels.", ephemeral=True)
+        await safe_interaction_response(interaction, "❌ This command can only be used in ticket channels.", ephemeral=True)
         return
     has_permission = False
     if ticket['claimed_by'] == interaction.user.id:
@@ -477,40 +564,40 @@ async def remove_user(interaction: discord.Interaction, user: discord.Member):
     elif has_middleman_role(interaction.user):
         has_permission = True
     if not has_permission:
-        await interaction.response.send_message("❌ You don't have permission to remove users from this ticket.", ephemeral=True)
+        await safe_interaction_response(interaction, "❌ You don't have permission to remove users from this ticket.", ephemeral=True)
         return
     if user.id == ticket['requester_id']:
-        await interaction.response.send_message("❌ You cannot remove the ticket requester.", ephemeral=True)
+        await safe_interaction_response(interaction, "❌ You cannot remove the ticket requester.", ephemeral=True)
         return
     if user.id == ticket['claimed_by']:
-        await interaction.response.send_message("❌ You cannot remove the assigned middleman.", ephemeral=True)
+        await safe_interaction_response(interaction, "❌ You cannot remove the assigned middleman.", ephemeral=True)
         return
     try:
-        await interaction.channel.set_permissions(user, overwrite=None)
+        await safe_discord_request(interaction.channel.set_permissions(user, overwrite=None))
         asyncio.create_task(db.log_action(ticket['ticket_id'], f"user_removed:{user.id}", interaction.user.id))
         embed = discord.Embed(description=f"✅ {user.mention} has been removed from the ticket by {interaction.user.mention}", color=discord.Color.orange())
-        await interaction.response.send_message(embed=embed)
+        await safe_interaction_response(interaction, embed=embed)
         log_channel = interaction.guild.get_channel(LOG_CHANNEL_ID)
         if log_channel:
             log_embed = discord.Embed(title="➖ User Removed from Ticket", color=discord.Color.orange(), timestamp=datetime.utcnow())
             log_embed.add_field(name="Ticket", value=interaction.channel.mention, inline=True)
             log_embed.add_field(name="Removed User", value=user.mention, inline=True)
             log_embed.add_field(name="Removed By", value=interaction.user.mention, inline=True)
-            asyncio.create_task(log_channel.send(embed=log_embed))
+            asyncio.create_task(safe_send_message(log_channel, embed=log_embed))
     except Exception as e:
         logger.error(f"Error removing user from ticket: {e}")
-        await interaction.response.send_message("❌ An error occurred while removing the user.", ephemeral=True)
+        await safe_interaction_response(interaction, "❌ An error occurred while removing the user.", ephemeral=True)
 
 
 @bot.tree.command(name="list_tickets", description="List all open tickets (Admin only)")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def list_tickets(interaction: discord.Interaction):
     if not is_admin(interaction.user):
-        await interaction.response.send_message("❌ You need Administrator permissions to use this command.", ephemeral=True)
+        await safe_interaction_response(interaction, "❌ You need Administrator permissions to use this command.", ephemeral=True)
         return
     tickets = await db.get_open_tickets()
     if not tickets:
-        await interaction.response.send_message("No open tickets found.", ephemeral=True)
+        await safe_interaction_response(interaction, "No open tickets found.", ephemeral=True)
         return
     embed = discord.Embed(title="📋 Open Tickets", color=discord.Color.blue(), timestamp=datetime.utcnow())
     for ticket in tickets[:25]:
@@ -521,7 +608,7 @@ async def list_tickets(interaction: discord.Interaction):
         embed.add_field(name=f"Ticket #{ticket['ticket_id']}", value=f"{channel_mention}\n{tier_info}\nStatus: {claimed_status}", inline=True)
     if len(tickets) > 25:
         embed.set_footer(text=f"Showing 25 of {len(tickets)} tickets")
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await safe_interaction_response(interaction, embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="export_ticket", description="Export ticket transcript (Admin only)")
@@ -529,16 +616,18 @@ async def list_tickets(interaction: discord.Interaction):
 @app_commands.describe(ticket_number="The ticket number to export")
 async def export_ticket(interaction: discord.Interaction, ticket_number: int):
     if not is_admin(interaction.user):
-        await interaction.response.send_message("❌ You need Administrator permissions to use this command.", ephemeral=True)
+        await safe_interaction_response(interaction, "❌ You need Administrator permissions to use this command.", ephemeral=True)
         return
-    await interaction.response.defer(ephemeral=True)
+    
+    await safe_interaction_defer(interaction, ephemeral=True)
+    
     ticket = await db.get_ticket_by_id(ticket_number)
     if not ticket:
-        await interaction.followup.send("❌ Ticket not found.", ephemeral=True)
+        await safe_interaction_followup(interaction, "❌ Ticket not found.", ephemeral=True)
         return
     channel = interaction.guild.get_channel(ticket['channel_id'])
     if not channel:
-        await interaction.followup.send("❌ Ticket channel not found.", ephemeral=True)
+        await safe_interaction_followup(interaction, "❌ Ticket channel not found.", ephemeral=True)
         return
     try:
         transcript = f"TICKET #{ticket_number} TRANSCRIPT\n"
@@ -557,20 +646,22 @@ async def export_ticket(interaction: discord.Interaction, ticket_number: int):
         filename = f"ticket_{ticket_number}_transcript.txt"
         with open(filename, 'w', encoding='utf-8') as f:
             f.write(transcript)
-        await interaction.followup.send(f"✅ Transcript exported for Ticket #{ticket_number}", file=discord.File(filename), ephemeral=True)
+        await safe_interaction_followup(interaction, f"✅ Transcript exported for Ticket #{ticket_number}", file=discord.File(filename), ephemeral=True)
         os.remove(filename)
     except Exception as e:
         logger.error(f"Error exporting ticket: {e}")
-        await interaction.followup.send("❌ An error occurred while exporting the ticket.", ephemeral=True)
+        await safe_interaction_followup(interaction, "❌ An error occurred while exporting the ticket.", ephemeral=True)
 
 
 @bot.tree.command(name="stats", description="View middleman statistics (Admin only)")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def stats(interaction: discord.Interaction):
     if not is_admin(interaction.user):
-        await interaction.response.send_message("❌ You need Administrator permissions to use this command.", ephemeral=True)
+        await safe_interaction_response(interaction, "❌ You need Administrator permissions to use this command.", ephemeral=True)
         return
-    await interaction.response.defer(ephemeral=True)
+    
+    await safe_interaction_defer(interaction, ephemeral=True)
+    
     try:
         open_tickets = await db.get_open_tickets()
         all_tickets = await db.get_all_tickets_count()
@@ -586,10 +677,10 @@ async def stats(interaction: discord.Interaction):
             tier_breakdown = "\n".join([f"{TIER_NAMES.get(tier, tier)}: {count}" for tier, count in tier_counts.items()])
             embed.add_field(name="Open Tickets by Tier", value=tier_breakdown, inline=False)
         embed.set_footer(text=f"Bot Uptime: {bot.user.name}")
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        await safe_interaction_followup(interaction, embed=embed, ephemeral=True)
     except Exception as e:
         logger.error(f"Error fetching stats: {e}")
-        await interaction.followup.send("❌ An error occurred while fetching statistics.", ephemeral=True)
+        await safe_interaction_followup(interaction, "❌ An error occurred while fetching statistics.", ephemeral=True)
 
 
 @bot.tree.command(name="help", description="Display help information about the bot")
@@ -603,15 +694,13 @@ async def help_command(interaction: discord.Interaction):
     embed.add_field(name="User Commands", value=("Click the Create Middleman Ticket button to start a trade\nSelect your tier based on trade value\nFill out the required information"), inline=False)
     embed.add_field(name="Tier Information", value=("🌱 Trial Middleman - Up to 2k Robux (No Fee)\n💼 Middleman - Up to 6k Robux (No Fee)\n⚡ Pro Middleman - Up to 10k Robux (No Fee)\n👑 Head Middleman - Up to 20k Robux (No Fee)\n💎 Owner - 20k+ Robux (Fee: 100 Robux or 20M Brainrot)"), inline=False)
     embed.set_footer(text="For support, contact an administrator")
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await safe_interaction_response(interaction, embed=embed, ephemeral=True)
 
 
 if __name__ == "__main__":
     async def main():
         async with bot:
-            # Start health check server for Render
             await start_health_server()
-            # Start the bot
             await bot.start(TOKEN)
     
     try:
