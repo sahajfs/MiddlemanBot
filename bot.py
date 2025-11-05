@@ -338,7 +338,7 @@ class TradeDetailsModal(discord.ui.Modal, title="Fill out the Format"):
             await safe_send_message(channel, content=f"{role_mention}", embed=embed, view=view)
             
             review_embed = discord.Embed(
-                description="⭐ Vouching and rating the middleman after trade is strictly necessary\nCopy the middleman user ID and paste it in 'write a review'",
+                description="⭐ Vouching and rating the middleman after trade is strictly necessary\nCopy the middleman user ID and paste it in 'submit a review'",
                 color=discord.Color.gold()
             )
             await safe_send_message(channel, embed=review_embed)
