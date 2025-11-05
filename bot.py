@@ -322,7 +322,7 @@ class TradeDetailsModal(discord.ui.Modal, title="Fill out the Format"):
             channel = await safe_discord_request(category.create_text_channel(name=f"mm-{self.tier}-{ticket_counter}", overwrites=overwrites))
             
             ticket_id = await db.create_ticket(channel.id, interaction.user.id, str(self.trader.value), str(self.giving.value), str(self.receiving.value), self.tier)
-            embed = discord.Embed(title="Middleman Request", description=f"✅ By creating a ticket you have read & agreed to our [terms](https://discord.com/channels/{GUILD_ID})", color=discord.Color.blue(), timestamp=datetime.utcnow())
+            embed = discord.Embed(title="Middleman Request", color=discord.Color.blue(), timestamp=datetime.utcnow())
             embed.add_field(name="Requester", value=interaction.user.mention, inline=True)
             embed.add_field(name="Trader", value=f"{self.trader.value}", inline=True)
             embed.add_field(name="Tier", value=f"{TIER_NAMES.get(self.tier, self.tier.title())}\n*{TIER_LIMITS.get(self.tier)}*", inline=False)
@@ -334,12 +334,14 @@ class TradeDetailsModal(discord.ui.Modal, title="Fill out the Format"):
             view = TicketActionsView()
             role_id = TIER_ROLES.get(self.tier)
             role_mention = f"<@&{role_id}>" if role_id else ""
-            mm_note = "mm use only:\n┕ want more info on your mm? run $mminfo (mm)"
             
-            await safe_send_message(channel, content=f"{role_mention}\n\n{mm_note}", embed=embed, view=view)
+            await safe_send_message(channel, content=f"{role_mention}", embed=embed, view=view)
             
-            vouch_embed = discord.Embed(description="❗ Vouching your middleman after the trade is required ❗", color=discord.Color.red())
-            await safe_send_message(channel, embed=vouch_embed)
+            review_embed = discord.Embed(
+                description="⭐ Vouching and rating the middleman after trade is strictly necessary\nCopy the middleman user ID and paste it in 'write a review'",
+                color=discord.Color.gold()
+            )
+            await safe_send_message(channel, embed=review_embed)
             
             asyncio.create_task(db.log_action(ticket_id, "created", interaction.user.id))
             log_channel = guild.get_channel(LOG_CHANNEL_ID)
@@ -694,6 +696,80 @@ async def help_command(interaction: discord.Interaction):
     embed.add_field(name="User Commands", value=("Click the Create Middleman Ticket button to start a trade\nSelect your tier based on trade value\nFill out the required information"), inline=False)
     embed.add_field(name="Tier Information", value=("🌱 Trial Middleman - Up to 2k Robux (No Fee)\n💼 Middleman - Up to 6k Robux (No Fee)\n⚡ Pro Middleman - Up to 10k Robux (No Fee)\n👑 Head Middleman - Up to 20k Robux (No Fee)\n💎 Owner - 20k+ Robux (Fee: 100 Robux or 20M Brainrot)"), inline=False)
     embed.set_footer(text="For support, contact an administrator")
+    await safe_interaction_response(interaction, embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="ping", description="Check if the bot is online and responsive")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def ping(interaction: discord.Interaction):
+    """Simple ping command - keeps bot active for Developer Badge"""
+    latency = round(bot.latency * 1000)
+    
+    embed = discord.Embed(
+        title="🏓 Pong!",
+        description=f"Bot is online and responsive!",
+        color=discord.Color.green(),
+        timestamp=datetime.utcnow()
+    )
+    embed.add_field(name="📶 Latency", value=f"{latency}ms", inline=True)
+    embed.add_field(name="🌐 Status", value="✅ Operational", inline=True)
+    embed.add_field(name="🗄️ Database", value="✅ Connected" if await db.health_check() else "❌ Disconnected", inline=True)
+    
+    if hasattr(bot, 'start_time'):
+        uptime = datetime.utcnow() - bot.start_time
+        days = uptime.days
+        hours, remainder = divmod(uptime.seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        uptime_str = f"{days}d {hours}h {minutes}m {seconds}s"
+        embed.add_field(name="⏱️ Uptime", value=uptime_str, inline=False)
+    
+    embed.set_footer(text=f"Requested by {interaction.user.name}", icon_url=interaction.user.display_avatar.url)
+    
+    await safe_interaction_response(interaction, embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="botinfo", description="Display bot information and statistics")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def botinfo(interaction: discord.Interaction):
+    """Detailed bot information - useful for Active Developer Badge"""
+    embed = discord.Embed(
+        title="🤖 Middleman Bot Information",
+        description="Professional middleman service bot for secure trading",
+        color=discord.Color.blue(),
+        timestamp=datetime.utcnow()
+    )
+    
+    # Bot stats
+    embed.add_field(name="📊 Servers", value=str(len(bot.guilds)), inline=True)
+    embed.add_field(name="👥 Users", value=str(len(bot.users)), inline=True)
+    embed.add_field(name="📶 Latency", value=f"{round(bot.latency * 1000)}ms", inline=True)
+    
+    # Ticket stats
+    try:
+        open_tickets = await db.get_open_tickets()
+        all_tickets = await db.get_all_tickets_count()
+        embed.add_field(name="🎫 Total Tickets", value=str(all_tickets), inline=True)
+        embed.add_field(name="📂 Open Tickets", value=str(len(open_tickets)), inline=True)
+        embed.add_field(name="✅ Closed Tickets", value=str(all_tickets - len(open_tickets)), inline=True)
+    except:
+        pass
+    
+    # Uptime
+    if hasattr(bot, 'start_time'):
+        uptime = datetime.utcnow() - bot.start_time
+        days = uptime.days
+        hours, remainder = divmod(uptime.seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        uptime_str = f"{days}d {hours}h {minutes}m"
+        embed.add_field(name="⏱️ Uptime", value=uptime_str, inline=True)
+    
+    # Bot info
+    embed.add_field(name="🔧 Commands", value=f"{len(bot.tree.get_commands())} slash commands", inline=True)
+    embed.add_field(name="🐍 Python", value=f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}", inline=True)
+    
+    embed.set_thumbnail(url=bot.user.display_avatar.url)
+    embed.set_footer(text=f"Requested by {interaction.user.name}", icon_url=interaction.user.display_avatar.url)
+    
     await safe_interaction_response(interaction, embed=embed, ephemeral=True)
 
 
