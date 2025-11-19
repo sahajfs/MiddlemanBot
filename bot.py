@@ -51,13 +51,23 @@ TIER_LIMITS = {
     'owner': '500m/s+ (fee required)'
 }
 
+# NEW: Tier hierarchy for permission system
+TIER_HIERARCHY = {
+    'trial': 1,
+    'middleman': 2,
+    'pro': 3,
+    'head': 4,
+    'owner': 5
+}
+
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
 intents.presences = False
 intents.typing = False
 
-bot = commands.Bot(command_prefix='!', intents=intents, chunk_guilds_at_startup=False, max_messages=100)
+# CHANGED: Prefix from '!' to '$'
+bot = commands.Bot(command_prefix='$', intents=intents, chunk_guilds_at_startup=False, max_messages=100)
 db = Database()
 ticket_counter = {'mm': 0, 'pvp': 0}
 URL_PATTERN = re.compile(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+')
@@ -145,6 +155,29 @@ def has_middleman_role(member: discord.Member) -> bool:
     result = any(role_id in user_roles for role_id in TIER_ROLES.values())
     _role_cache[cache_key] = {'result': result, 'time': datetime.utcnow().timestamp()}
     return result
+
+# NEW: Get member's highest tier
+def get_member_tier(member: discord.Member) -> str:
+    """Returns the highest tier role a member has"""
+    user_role_ids = [role.id for role in member.roles]
+    highest_tier = None
+    highest_rank = 0
+    
+    for tier, role_id in TIER_ROLES.items():
+        if role_id in user_role_ids:
+            if TIER_HIERARCHY[tier] > highest_rank:
+                highest_rank = TIER_HIERARCHY[tier]
+                highest_tier = tier
+    
+    return highest_tier
+
+# NEW: Check if member can access a ticket tier
+def can_access_tier(member: discord.Member, ticket_tier: str) -> bool:
+    """Check if member's tier is >= ticket tier"""
+    member_tier = get_member_tier(member)
+    if not member_tier:
+        return False
+    return TIER_HIERARCHY[member_tier] >= TIER_HIERARCHY[ticket_tier]
 
 def is_admin(member: discord.Member) -> bool:
     return member.guild_permissions.administrator
@@ -339,16 +372,20 @@ class MMDetailsModal(discord.ui.Modal, title="Middleman Trade Details"):
             global ticket_counter
             ticket_counter['mm'] += 1
             
+            # CHANGED: Only give access to this tier and higher
             overwrites = {
                 guild.default_role: discord.PermissionOverwrite(view_channel=False),
                 interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
                 guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True, manage_messages=True)
             }
             
-            for role_id in TIER_ROLES.values():
-                role = guild.get_role(role_id)
-                if role:
-                    overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+            # Add only roles that are >= this ticket's tier
+            ticket_tier_level = TIER_HIERARCHY[self.tier]
+            for tier_name, role_id in TIER_ROLES.items():
+                if TIER_HIERARCHY[tier_name] >= ticket_tier_level:
+                    role = guild.get_role(role_id)
+                    if role:
+                        overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
             
             channel = await safe_discord_request(
                 category.create_text_channel(
@@ -459,16 +496,20 @@ class PvPDetailsModal(discord.ui.Modal, title="PvP Trade Details"):
             global ticket_counter
             ticket_counter['pvp'] += 1
             
+            # CHANGED: Only give access to this tier and higher
             overwrites = {
                 guild.default_role: discord.PermissionOverwrite(view_channel=False),
                 interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
                 guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True, manage_messages=True)
             }
             
-            for role_id in TIER_ROLES.values():
-                role = guild.get_role(role_id)
-                if role:
-                    overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+            # Add only roles that are >= this ticket's tier
+            ticket_tier_level = TIER_HIERARCHY[self.tier]
+            for tier_name, role_id in TIER_ROLES.items():
+                if TIER_HIERARCHY[tier_name] >= ticket_tier_level:
+                    role = guild.get_role(role_id)
+                    if role:
+                        overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
             
             channel = await safe_discord_request(
                 category.create_text_channel(
@@ -549,6 +590,11 @@ class TicketActionsView(discord.ui.View):
         
         if not has_middleman_role(interaction.user):
             await safe_interaction_response(interaction, "❌ Only middlemen can claim tickets.", ephemeral=True)
+            return
+        
+        # CHANGED: Check if user can access this tier
+        if not can_access_tier(interaction.user, ticket['tier']):
+            await safe_interaction_response(interaction, "❌ You don't have permission to claim this tier ticket.", ephemeral=True)
             return
         
         if ticket['claimed_by']:
@@ -687,20 +733,22 @@ async def setuppvp(interaction: discord.Interaction):
     await safe_send_message(interaction.channel, embed=embed, view=view)
     await safe_interaction_response(interaction, "✅ PvP setup complete!", ephemeral=True)
 
-@bot.tree.command(name="confirm", description="Start trade confirmation (MM/Admin only)")
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def confirm(interaction: discord.Interaction):
-    mm_ticket = await db.get_mm_ticket_by_channel(interaction.channel.id)
-    pvp_ticket = await db.get_pvp_ticket_by_channel(interaction.channel.id)
+# ==================== PREFIX COMMANDS ====================
+
+@bot.command(name="confirm")
+async def confirm_prefix(ctx):
+    """Start trade confirmation (MM/Admin only)"""
+    mm_ticket = await db.get_mm_ticket_by_channel(ctx.channel.id)
+    pvp_ticket = await db.get_pvp_ticket_by_channel(ctx.channel.id)
     ticket = mm_ticket or pvp_ticket
     ticket_type = 'mm' if mm_ticket else 'pvp'
     
     if not ticket:
-        await safe_interaction_response(interaction, "❌ This command can only be used in ticket channels.", ephemeral=True)
+        await ctx.send("❌ This command can only be used in ticket channels.", delete_after=5)
         return
     
-    if not (is_admin(interaction.user) or ticket['claimed_by'] == interaction.user.id):
-        await safe_interaction_response(interaction, "❌ Only admins or the claimer can use this.", ephemeral=True)
+    if not (is_admin(ctx.author) or ticket['claimed_by'] == ctx.author.id):
+        await ctx.send("❌ Only admins or the claimer can use this.", delete_after=5)
         return
     
     embed = discord.Embed(
@@ -717,34 +765,32 @@ async def confirm(interaction: discord.Interaction):
     )
     
     view = ConfirmationView(ticket['ticket_id'], ticket_type)
-    await safe_send_message(interaction.channel, embed=embed, view=view)
-    await safe_interaction_response(interaction, "✅ Confirmation started!", ephemeral=True)
+    await safe_send_message(ctx.channel, embed=embed, view=view)
+    await ctx.message.add_reaction("✅")
 
-@bot.tree.command(name="proof", description="Mark trade complete & send proof (MM only)")
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def proof(interaction: discord.Interaction):
-    mm_ticket = await db.get_mm_ticket_by_channel(interaction.channel.id)
-    pvp_ticket = await db.get_pvp_ticket_by_channel(interaction.channel.id)
+@bot.command(name="proof")
+async def proof_prefix(ctx):
+    """Mark trade complete & send proof (MM only)"""
+    mm_ticket = await db.get_mm_ticket_by_channel(ctx.channel.id)
+    pvp_ticket = await db.get_pvp_ticket_by_channel(ctx.channel.id)
     ticket = mm_ticket or pvp_ticket
     ticket_type = 'mm' if mm_ticket else 'pvp'
     
     if not ticket:
-        await safe_interaction_response(interaction, "❌ This command can only be used in ticket channels.", ephemeral=True)
+        await ctx.send("❌ This command can only be used in ticket channels.", delete_after=5)
         return
     
-    if not has_middleman_role(interaction.user):
-        await safe_interaction_response(interaction, "❌ Only middlemen can use this command.", ephemeral=True)
+    if not has_middleman_role(ctx.author):
+        await ctx.send("❌ Only middlemen can use this command.", delete_after=5)
         return
-    
-    await safe_interaction_defer(interaction, ephemeral=True)
     
     try:
-        proof_channel = interaction.guild.get_channel(PROOF_CHANNEL_ID)
+        proof_channel = ctx.guild.get_channel(PROOF_CHANNEL_ID)
         if not proof_channel:
-            await safe_interaction_followup(interaction, "❌ Proof channel not found.", ephemeral=True)
+            await ctx.send("❌ Proof channel not found.", delete_after=5)
             return
         
-        requester = await get_member_cached(interaction.guild, ticket['requester_id'])
+        requester = await get_member_cached(ctx.guild, ticket['requester_id'])
         requester_mention = requester.mention if requester else f"<@{ticket['requester_id']}>"
         
         proof_embed = discord.Embed(
@@ -752,7 +798,7 @@ async def proof(interaction: discord.Interaction):
             color=discord.Color.green(),
             timestamp=datetime.utcnow()
         )
-        proof_embed.add_field(name="**Middleman**", value=interaction.user.mention, inline=True)
+        proof_embed.add_field(name="**Middleman**", value=ctx.author.mention, inline=True)
         proof_embed.add_field(name="**Type**", value=ticket_type.upper(), inline=True)
         proof_embed.add_field(name="**Tier**", value=TIER_NAMES[ticket['tier']], inline=True)
         proof_embed.add_field(name="**Requester**", value=requester_mention, inline=True)
@@ -769,26 +815,147 @@ async def proof(interaction: discord.Interaction):
         proof_embed.set_footer(text=f"Ticket #{ticket['ticket_id']}")
         
         await safe_send_message(proof_channel, embed=proof_embed)
-        await db.add_proof(ticket['ticket_id'], ticket_type, interaction.user.id)
-        await db.log_action(ticket['ticket_id'], ticket_type, "proof_submitted", interaction.user.id)
+        await db.add_proof(ticket['ticket_id'], ticket_type, ctx.author.id)
+        await db.log_action(ticket['ticket_id'], ticket_type, "proof_submitted", ctx.author.id)
         
-        await safe_interaction_followup(interaction, "✅ Proof sent to proof channel!", ephemeral=True)
+        await ctx.message.add_reaction("✅")
         
         success_embed = discord.Embed(
-            description=f"✅ **Trade completed by {interaction.user.mention}**\nProof submitted!",
+            description=f"✅ **Trade completed by {ctx.author.mention}**\nProof submitted!",
             color=discord.Color.green()
         )
-        await safe_send_message(interaction.channel, embed=success_embed)
+        await safe_send_message(ctx.channel, embed=success_embed)
     except Exception as e:
         logger.error(f"Error submitting proof: {e}")
-        await safe_interaction_followup(interaction, "❌ An error occurred while submitting proof.", ephemeral=True)
+        await ctx.send("❌ An error occurred while submitting proof.", delete_after=5)
 
-@bot.tree.command(name="mmstats", description="Check middleman statistics")
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-@app_commands.describe(middleman="The middleman to check stats for")
-async def mmstats(interaction: discord.Interaction, middleman: discord.Member):
-    await safe_interaction_defer(interaction, ephemeral=True)
+@bot.command(name="close")
+async def close_prefix(ctx):
+    """Close the current ticket (MM only)"""
+    mm_ticket = await db.get_mm_ticket_by_channel(ctx.channel.id)
+    pvp_ticket = await db.get_pvp_ticket_by_channel(ctx.channel.id)
+    ticket = mm_ticket or pvp_ticket
+    ticket_type = 'mm' if mm_ticket else 'pvp'
     
+    if not ticket:
+        await ctx.send("❌ This command can only be used in ticket channels.", delete_after=5)
+        return
+    
+    if not has_middleman_role(ctx.author):
+        await ctx.send("❌ Only middlemen can close tickets.", delete_after=5)
+        return
+    
+    await ctx.send("🔒 Closing ticket now...")
+    
+    if ticket_type == 'mm':
+        await db.close_mm_ticket(ctx.channel.id)
+    else:
+        await db.close_pvp_ticket(ctx.channel.id)
+    
+    asyncio.create_task(db.log_action(ticket['ticket_id'], ticket_type, "closed", ctx.author.id))
+    
+    log_channel = ctx.guild.get_channel(LOG_CHANNEL_ID)
+    if log_channel:
+        log_embed = discord.Embed(
+            title="🔒 Ticket Closed",
+            color=discord.Color.orange(),
+            timestamp=datetime.utcnow()
+        )
+        log_embed.add_field(name="Ticket", value=ctx.channel.name, inline=True)
+        log_embed.add_field(name="Closed by", value=ctx.author.mention, inline=True)
+        asyncio.create_task(safe_send_message(log_channel, embed=log_embed))
+    
+    await asyncio.sleep(1)
+    await safe_discord_request(ctx.channel.delete(reason=f"Ticket closed by {ctx.author}"))
+
+@bot.command(name="add")
+async def add_prefix(ctx, user: discord.Member):
+    """Add a user to the ticket"""
+    mm_ticket = await db.get_mm_ticket_by_channel(ctx.channel.id)
+    pvp_ticket = await db.get_pvp_ticket_by_channel(ctx.channel.id)
+    ticket = mm_ticket or pvp_ticket
+    ticket_type = 'mm' if mm_ticket else 'pvp'
+    
+    if not ticket:
+        await ctx.send("❌ This command can only be used in ticket channels.", delete_after=5)
+        return
+    
+    has_permission = False
+    if ticket['claimed_by'] == ctx.author.id or ticket['requester_id'] == ctx.author.id or has_middleman_role(ctx.author):
+        has_permission = True
+    
+    if not has_permission:
+        await ctx.send("❌ You don't have permission to add users to this ticket.", delete_after=5)
+        return
+    
+    if ctx.channel.permissions_for(user).view_channel:
+        await ctx.send(f"❌ {user.mention} already has access to this ticket.", delete_after=5)
+        return
+    
+    try:
+        await safe_discord_request(
+            ctx.channel.set_permissions(
+                user,
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True
+            )
+        )
+        asyncio.create_task(db.log_action(ticket['ticket_id'], ticket_type, f"user_added:{user.id}", ctx.author.id))
+        
+        embed = discord.Embed(
+            description=f"✅ {user.mention} has been added to the ticket by {ctx.author.mention}",
+            color=discord.Color.green()
+        )
+        await safe_send_message(ctx.channel, embed=embed)
+    except Exception as e:
+        logger.error(f"Error adding user to ticket: {e}")
+        await ctx.send("❌ An error occurred while adding the user.", delete_after=5)
+
+@bot.command(name="remove")
+async def remove_prefix(ctx, user: discord.Member):
+    """Remove a user from the ticket"""
+    mm_ticket = await db.get_mm_ticket_by_channel(ctx.channel.id)
+    pvp_ticket = await db.get_pvp_ticket_by_channel(ctx.channel.id)
+    ticket = mm_ticket or pvp_ticket
+    ticket_type = 'mm' if mm_ticket else 'pvp'
+    
+    if not ticket:
+        await ctx.send("❌ This command can only be used in ticket channels.", delete_after=5)
+        return
+    
+    has_permission = False
+    if ticket['claimed_by'] == ctx.author.id or ticket['requester_id'] == ctx.author.id or has_middleman_role(ctx.author):
+        has_permission = True
+    
+    if not has_permission:
+        await ctx.send("❌ You don't have permission to remove users from this ticket.", delete_after=5)
+        return
+    
+    if user.id == ticket['requester_id']:
+        await ctx.send("❌ You cannot remove the ticket requester.", delete_after=5)
+        return
+    
+    if user.id == ticket['claimed_by']:
+        await ctx.send("❌ You cannot remove the assigned middleman.", delete_after=5)
+        return
+    
+    try:
+        await safe_discord_request(ctx.channel.set_permissions(user, overwrite=None))
+        asyncio.create_task(db.log_action(ticket['ticket_id'], ticket_type, f"user_removed:{user.id}", ctx.author.id))
+        
+        embed = discord.Embed(
+            description=f"✅ {user.mention} has been removed from the ticket by {ctx.author.mention}",
+            color=discord.Color.orange()
+        )
+        await safe_send_message(ctx.channel, embed=embed)
+    except Exception as e:
+        logger.error(f"Error removing user from ticket: {e}")
+        await ctx.send("❌ An error occurred while removing the user.", delete_after=5)
+
+@bot.command(name="mmstats")
+async def mmstats_prefix(ctx, middleman: discord.Member):
+    """Check middleman statistics (PUBLIC)"""
     try:
         stats = await db.get_mm_stats(middleman.id)
         
@@ -798,7 +965,7 @@ async def mmstats(interaction: discord.Interaction, middleman: discord.Member):
                 description=f"{middleman.mention}\n\n**Total Tickets Completed: 0**\n\nThis middleman hasn't completed any tickets yet.",
                 color=0x2B2D31
             )
-            await safe_interaction_followup(interaction, embed=embed, ephemeral=True)
+            await safe_send_message(ctx.channel, embed=embed)
             return
         
         rankings = await db.get_mm_rankings()
@@ -822,138 +989,12 @@ async def mmstats(interaction: discord.Interaction, middleman: discord.Member):
             )
         
         embed.set_footer(text=f"Stats for {middleman.display_name}")
-        await safe_interaction_followup(interaction, embed=embed, ephemeral=True)
+        await safe_send_message(ctx.channel, embed=embed)
     except Exception as e:
         logger.error(f"Error fetching stats: {e}")
-        await safe_interaction_followup(interaction, "❌ An error occurred while fetching stats.", ephemeral=True)
+        await ctx.send("❌ An error occurred while fetching stats.", delete_after=5)
 
-@bot.tree.command(name="close", description="Close the current ticket (MM only)")
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def close_ticket_cmd(interaction: discord.Interaction):
-    mm_ticket = await db.get_mm_ticket_by_channel(interaction.channel.id)
-    pvp_ticket = await db.get_pvp_ticket_by_channel(interaction.channel.id)
-    ticket = mm_ticket or pvp_ticket
-    ticket_type = 'mm' if mm_ticket else 'pvp'
-    
-    if not ticket:
-        await safe_interaction_response(interaction, "❌ This command can only be used in ticket channels.", ephemeral=True)
-        return
-    
-    if not has_middleman_role(interaction.user):
-        await safe_interaction_response(interaction, "❌ Only middlemen can close tickets.", ephemeral=True)
-        return
-    
-    await safe_interaction_response(interaction, "🔒 Closing ticket now...", ephemeral=True)
-    
-    if ticket_type == 'mm':
-        await db.close_mm_ticket(interaction.channel.id)
-    else:
-        await db.close_pvp_ticket(interaction.channel.id)
-    
-    asyncio.create_task(db.log_action(ticket['ticket_id'], ticket_type, "closed", interaction.user.id))
-    
-    log_channel = interaction.guild.get_channel(LOG_CHANNEL_ID)
-    if log_channel:
-        log_embed = discord.Embed(
-            title="🔒 Ticket Closed",
-            color=discord.Color.orange(),
-            timestamp=datetime.utcnow()
-        )
-        log_embed.add_field(name="Ticket", value=interaction.channel.name, inline=True)
-        log_embed.add_field(name="Closed by", value=interaction.user.mention, inline=True)
-        asyncio.create_task(safe_send_message(log_channel, embed=log_embed))
-    
-    await asyncio.sleep(1)
-    await safe_discord_request(interaction.channel.delete(reason=f"Ticket closed by {interaction.user}"))
-
-@bot.tree.command(name="add", description="Add a user to the ticket")
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-@app_commands.describe(user="The user to add to this ticket")
-async def add_user(interaction: discord.Interaction, user: discord.Member):
-    mm_ticket = await db.get_mm_ticket_by_channel(interaction.channel.id)
-    pvp_ticket = await db.get_pvp_ticket_by_channel(interaction.channel.id)
-    ticket = mm_ticket or pvp_ticket
-    ticket_type = 'mm' if mm_ticket else 'pvp'
-    
-    if not ticket:
-        await safe_interaction_response(interaction, "❌ This command can only be used in ticket channels.", ephemeral=True)
-        return
-    
-    has_permission = False
-    if ticket['claimed_by'] == interaction.user.id or ticket['requester_id'] == interaction.user.id or has_middleman_role(interaction.user):
-        has_permission = True
-    
-    if not has_permission:
-        await safe_interaction_response(interaction, "❌ You don't have permission to add users to this ticket.", ephemeral=True)
-        return
-    
-    if interaction.channel.permissions_for(user).view_channel:
-        await safe_interaction_response(interaction, f"❌ {user.mention} already has access to this ticket.", ephemeral=True)
-        return
-    
-    try:
-        await safe_discord_request(
-            interaction.channel.set_permissions(
-                user,
-                view_channel=True,
-                send_messages=True,
-                read_message_history=True
-            )
-        )
-        asyncio.create_task(db.log_action(ticket['ticket_id'], ticket_type, f"user_added:{user.id}", interaction.user.id))
-        
-        embed = discord.Embed(
-            description=f"✅ {user.mention} has been added to the ticket by {interaction.user.mention}",
-color=discord.Color.green()
-        )
-        await safe_interaction_response(interaction, embed=embed)
-    except Exception as e:
-        logger.error(f"Error adding user to ticket: {e}")
-        await safe_interaction_response(interaction, "❌ An error occurred while adding the user.", ephemeral=True)
-
-@bot.tree.command(name="remove", description="Remove a user from the ticket")
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-@app_commands.describe(user="The user to remove from this ticket")
-async def remove_user(interaction: discord.Interaction, user: discord.Member):
-    mm_ticket = await db.get_mm_ticket_by_channel(interaction.channel.id)
-    pvp_ticket = await db.get_pvp_ticket_by_channel(interaction.channel.id)
-    ticket = mm_ticket or pvp_ticket
-    ticket_type = 'mm' if mm_ticket else 'pvp'
-    
-    if not ticket:
-        await safe_interaction_response(interaction, "❌ This command can only be used in ticket channels.", ephemeral=True)
-        return
-    
-    has_permission = False
-    if ticket['claimed_by'] == interaction.user.id or ticket['requester_id'] == interaction.user.id or has_middleman_role(interaction.user):
-        has_permission = True
-    
-    if not has_permission:
-        await safe_interaction_response(interaction, "❌ You don't have permission to remove users from this ticket.", ephemeral=True)
-        return
-    
-    if user.id == ticket['requester_id']:
-        await safe_interaction_response(interaction, "❌ You cannot remove the ticket requester.", ephemeral=True)
-        return
-    
-    if user.id == ticket['claimed_by']:
-        await safe_interaction_response(interaction, "❌ You cannot remove the assigned middleman.", ephemeral=True)
-        return
-    
-    try:
-        await safe_discord_request(
-            interaction.channel.set_permissions(user, overwrite=None)
-        )
-        asyncio.create_task(db.log_action(ticket['ticket_id'], ticket_type, f"user_removed:{user.id}", interaction.user.id))
-        
-        embed = discord.Embed(
-            description=f"✅ {user.mention} has been removed from the ticket by {interaction.user.mention}",
-            color=discord.Color.orange()
-        )
-        await safe_interaction_response(interaction, embed=embed)
-    except Exception as e:
-        logger.error(f"Error removing user from ticket: {e}")
-        await safe_interaction_response(interaction, "❌ An error occurred while removing the user.", ephemeral=True)
+# ==================== OTHER COMMANDS ====================
 
 @bot.tree.command(name="help", description="Display help information about the bot")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
@@ -977,13 +1018,13 @@ async def help_command(interaction: discord.Interaction):
     
     if has_middleman_role(interaction.user):
         embed.add_field(
-            name="**Middleman Commands**",
+            name="**Middleman Commands (Prefix: $)**",
             value=(
-                "/confirm - Start confirmation\n"
-                "/proof - Mark trade complete\n"
-                "/close - Close the ticket\n"
-                "/add - Add user to ticket\n"
-                "/remove - Remove user from ticket"
+                "$confirm - Start confirmation\n"
+                "$proof - Mark trade complete\n"
+                "$close - Close the ticket\n"
+                "$add @user - Add user to ticket\n"
+                "$remove @user - Remove user from ticket"
             ),
             inline=False
         )
@@ -991,7 +1032,7 @@ async def help_command(interaction: discord.Interaction):
     embed.add_field(
         name="**User Commands**",
         value=(
-            "/mmstats @user - Check MM stats\n"
+            "$mmstats @user - Check MM stats (PUBLIC)\n"
             "/help - Show commands\n"
             "/ping - Check bot status"
         ),
@@ -1100,3 +1141,4 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Fatal error: {e}")
         sys.exit(1)
+
