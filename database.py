@@ -25,24 +25,55 @@ class Database:
             raise
     
     async def init_db(self):
-        """Initialize database tables (already created in Supabase)"""
-        logger.info("✅ Database initialized")
+        """Initialize database tables"""
+        try:
+            async with self.pool.acquire() as conn:
+                # Create setup_messages table for persistent buttons
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS setup_messages (
+                        id SERIAL PRIMARY KEY,
+                        message_type TEXT NOT NULL UNIQUE,
+                        channel_id BIGINT NOT NULL,
+                        message_id BIGINT NOT NULL,
+                        created_at TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
+            logger.info("✅ Database initialized")
+        except Exception as e:
+            logger.error(f"Error initializing database: {e}")
+    
+    # ==================== SETUP MESSAGES (PERSISTENT) ====================
+    
+    async def save_setup_message(self, message_type: str, channel_id: int, message_id: int):
+        """Save or update setup message for persistence"""
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO setup_messages (message_type, channel_id, message_id)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (message_type) 
+                DO UPDATE SET channel_id = $2, message_id = $3
+            """, message_type, channel_id, message_id)
+    
+    async def get_setup_message(self, message_type: str):
+        """Get setup message info"""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT channel_id, message_id FROM setup_messages 
+                WHERE message_type = $1
+            """, message_type)
+            return dict(row) if row else None
     
     # ==================== MM TICKETS ====================
     
     async def create_mm_ticket(self, channel_id, requester_id, trader_username, giving, receiving, can_join_links, tip, tier):
         """Create a new MM ticket"""
-        try:
-            async with self.pool.acquire() as conn:
-                row = await conn.fetchrow("""
-                    INSERT INTO middleman_tickets (channel_id, requester_id, trader_username, giving, receiving, can_join_links, tip, tier)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                    RETURNING ticket_id
-                """, channel_id, requester_id, trader_username, giving, receiving, can_join_links, tip, tier)
-                return row['ticket_id']
-        except Exception as e:
-            logger.error(f"Error creating MM ticket: {e}")
-            raise
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                INSERT INTO middleman_tickets (channel_id, requester_id, trader_username, giving, receiving, can_join_links, tip, tier)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                RETURNING ticket_id
+            """, channel_id, requester_id, trader_username, giving, receiving, can_join_links, tip, tier)
+            return row['ticket_id']
     
     async def get_mm_ticket_by_channel(self, channel_id):
         """Get MM ticket by channel ID"""
@@ -58,47 +89,38 @@ class Database:
     
     async def claim_mm_ticket(self, channel_id, user_id):
         """Mark MM ticket as claimed"""
-        try:
-            async with self.pool.acquire() as conn:
-                await conn.execute("""
-                    UPDATE middleman_tickets SET claimed_by = $1 WHERE channel_id = $2
-                """, user_id, channel_id)
-        except Exception as e:
-            logger.error(f"Error claiming MM ticket: {e}")
-            raise
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE middleman_tickets SET claimed_by = $1 WHERE channel_id = $2
+            """, user_id, channel_id)
+    
+    async def unclaim_mm_ticket(self, channel_id):
+        """Mark MM ticket as unclaimed"""
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE middleman_tickets SET claimed_by = NULL WHERE channel_id = $1
+            """, channel_id)
     
     async def close_mm_ticket(self, channel_id):
         """Mark MM ticket as closed"""
-        try:
-            async with self.pool.acquire() as conn:
-                await conn.execute("""
-                    UPDATE middleman_tickets SET status = 'closed', closed_at = NOW() WHERE channel_id = $1
-                """, channel_id)
-        except Exception as e:
-            logger.error(f"Error closing MM ticket: {e}")
-            raise
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE middleman_tickets SET status = 'closed', closed_at = NOW() WHERE channel_id = $1
+            """, channel_id)
     
     async def get_open_mm_tickets(self):
         """Get all open MM tickets"""
-        try:
-            async with self.pool.acquire() as conn:
-                rows = await conn.fetch("""
-                    SELECT * FROM middleman_tickets WHERE status = 'open' ORDER BY created_at DESC
-                """)
-                return [dict(row) for row in rows]
-        except Exception as e:
-            logger.error(f"Error getting open MM tickets: {e}")
-            return []
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT * FROM middleman_tickets WHERE status = 'open' ORDER BY created_at DESC
+            """)
+            return [dict(row) for row in rows]
     
     async def get_all_mm_tickets_count(self):
         """Get total count of all MM tickets"""
-        try:
-            async with self.pool.acquire() as conn:
-                row = await conn.fetchrow("SELECT COUNT(*) FROM middleman_tickets")
-                return row['count']
-        except Exception as e:
-            logger.error(f"Error counting MM tickets: {e}")
-            return 0
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT COUNT(*) FROM middleman_tickets")
+            return row['count']
     
     # ==================== PVP TICKETS ====================
     
@@ -130,25 +152,24 @@ class Database:
     
     async def claim_pvp_ticket(self, channel_id, user_id):
         """Mark PvP ticket as claimed"""
-        try:
-            async with self.pool.acquire() as conn:
-                await conn.execute("""
-                    UPDATE pvp_tickets SET claimed_by = $1 WHERE channel_id = $2
-                """, user_id, channel_id)
-        except Exception as e:
-            logger.error(f"Error claiming PvP ticket: {e}")
-            raise
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE pvp_tickets SET claimed_by = $1 WHERE channel_id = $2
+            """, user_id, channel_id)
+    
+    async def unclaim_pvp_ticket(self, channel_id):
+        """Mark PvP ticket as unclaimed"""
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE pvp_tickets SET claimed_by = NULL WHERE channel_id = $1
+            """, channel_id)
     
     async def close_pvp_ticket(self, channel_id):
         """Mark PvP ticket as closed"""
-        try:
-            async with self.pool.acquire() as conn:
-                await conn.execute("""
-                    UPDATE pvp_tickets SET status = 'closed', closed_at = NOW() WHERE channel_id = $1
-                """, channel_id)
-        except Exception as e:
-            logger.error(f"Error closing PvP ticket: {e}")
-            raise
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE pvp_tickets SET status = 'closed', closed_at = NOW() WHERE channel_id = $1
+            """, channel_id)
     
     async def get_open_pvp_tickets(self):
         """Get all open PvP tickets"""
@@ -273,4 +294,3 @@ class Database:
         except Exception as e:
             logger.error(f"Database health check failed: {e}")
             return False
-
