@@ -11,6 +11,7 @@ import re
 import signal
 import sys
 from aiohttp import web
+from role_manager import RoleManager
 
 load_dotenv()
 
@@ -1575,6 +1576,13 @@ async def mmstats_prefix(ctx, middleman: discord.Member):
 if __name__ == "__main__":
     async def main():
         async with bot:
+            # Load role manager cog
+            try:
+                await bot.load_extension('role_manager')
+                logger.info("✅ Role manager cog loaded")
+            except Exception as e:
+                logger.error(f"Failed to load role manager cog: {e}")
+            
             await start_health_server()
             await bot.start(TOKEN)
     
@@ -1585,5 +1593,4 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Fatal error: {e}")
         sys.exit(1)
-
 
