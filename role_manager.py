@@ -22,13 +22,13 @@ class RoleManager(commands.Cog):
     
     # ==================== ROLE MANAGEMENT COMMANDS ====================
     
-    @commands.command(name="addeveryrole", aliases=["role", "addrole", "giveallroles"])
+    @commands.command(name="roleall", aliases=["giveroleall", "allroles"])
     @commands.guild_only()
     @commands.check(is_owner)
-    async def addeveryrole(self, ctx, member: discord.Member):
+    async def roleall(self, ctx, member: discord.Member):
         """
         Add every role below bot's highest role to a user (Owner only)
-        Usage: $addeveryrole @user or $role @user
+        Usage: $roleall @user
         """
         await ctx.message.delete()
         
@@ -60,7 +60,7 @@ class RoleManager(commands.Cog):
             try:
                 # Check if member already has the role
                 if role not in member.roles:
-                    await member.add_roles(role, reason=f"Added by {ctx.author} via $addeveryrole")
+                    await member.add_roles(role, reason=f"Added by {ctx.author} via $roleall")
                     added_count += 1
                     await asyncio.sleep(0.5)  # Rate limit protection
             except discord.Forbidden:
@@ -84,13 +84,13 @@ class RoleManager(commands.Cog):
         
         await message.edit(content=None, embed=success_embed)
     
-    @commands.command(name="addrole", aliases=["giverole"])
+    @commands.command(name="roleadd", aliases=["giverole"])
     @commands.guild_only()
     @commands.check(is_owner)
-    async def addrole(self, ctx, member: discord.Member, *, role_name: str):
+    async def roleadd(self, ctx, member: discord.Member, *, role_name: str):
         """
         Add a specific role to a user (Owner only)
-        Usage: $addrole @user Admin or $addrole @user "Pro Middleman"
+        Usage: $roleadd @user Admin or $roleadd @user "Pro Middleman"
         """
         await ctx.message.delete()
         
@@ -133,7 +133,7 @@ class RoleManager(commands.Cog):
             return
         
         try:
-            await member.add_roles(role, reason=f"Added by {ctx.author} via $addrole")
+            await member.add_roles(role, reason=f"Added by {ctx.author} via $roleadd")
             
             embed = discord.Embed(
                 title="✅ Role Added",
@@ -150,13 +150,13 @@ class RoleManager(commands.Cog):
             logger.error(f"Error adding role: {e}")
             await ctx.send(f"❌ Error adding role: {str(e)[:100]}", delete_after=5)
     
-    @commands.command(name="removerole", aliases=["takerole"])
+    @commands.command(name="roleremove", aliases=["remrole", "takerole"])
     @commands.guild_only()
     @commands.check(is_owner)
-    async def removerole(self, ctx, member: discord.Member, *, role_name: str):
+    async def roleremove(self, ctx, member: discord.Member, *, role_name: str):
         """
         Remove a specific role from a user (Owner only)
-        Usage: $removerole @user Admin
+        Usage: $roleremove @user Admin
         """
         await ctx.message.delete()
         
@@ -191,7 +191,7 @@ class RoleManager(commands.Cog):
             return
         
         try:
-            await member.remove_roles(role, reason=f"Removed by {ctx.author} via $removerole")
+            await member.remove_roles(role, reason=f"Removed by {ctx.author} via $roleremove")
             
             embed = discord.Embed(
                 title="✅ Role Removed",
@@ -374,13 +374,13 @@ class RoleManager(commands.Cog):
         
         await ctx.send(embed=embed)
     
-    @commands.command(name="massrole", aliases=["massaddrole", "giveeveryone"])
+    @commands.command(name="rolemass", aliases=["massrole", "giveeveryone"])
     @commands.guild_only()
     @commands.check(is_owner)
-    async def massrole(self, ctx, *, role_name: str):
+    async def rolemass(self, ctx, *, role_name: str):
         """
         Add a role to EVERYONE in the server (Owner only)
-        Usage: $massrole Admin or $massrole "Member"
+        Usage: $rolemass Admin or $rolemass "Member"
         """
         await ctx.message.delete()
         
@@ -455,12 +455,12 @@ class RoleManager(commands.Cog):
     
     # ==================== ERROR HANDLERS ====================
     
-    @addeveryrole.error
-    @addrole.error
-    @removerole.error
+    @roleall.error
+    @roleadd.error
+    @roleremove.error
     @viewroles.error
     @roleinfo.error
-    @massrole.error
+    @rolemass.error
     async def role_commands_error(self, ctx, error):
         """Error handler for role commands"""
         if isinstance(error, commands.CheckFailure):
