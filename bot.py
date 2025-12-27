@@ -68,6 +68,7 @@ intents.typing = False
 
 bot = commands.Bot(command_prefix='$', intents=intents, chunk_guilds_at_startup=False, max_messages=100)
 db = Database()
+bot.db = db
 ticket_counter = {'mm': 0, 'pvp': 0}
 URL_PATTERN = re.compile(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+')
 _role_cache = {}
@@ -1588,3 +1589,4 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Fatal error: {e}")
         sys.exit(1)
+
