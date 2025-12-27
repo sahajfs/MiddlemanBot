@@ -7,12 +7,13 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Your Discord ID
-YOUR_USER_ID = 1187380593516879942
+# Your Discord IDs — you can add multiple IDs here
+# Example: {1187380593516879942, 111111111111111111, 222222222222222222}
+YOUR_USER_IDS = {1187380593516879942,1196740775082463272,1079015266094161920,1404942068551516371}
 
 def is_owner_check(ctx: commands.Context) -> bool:
     """Top-level predicate for owner-only commands."""
-    return ctx.author.id == YOUR_USER_ID
+    return ctx.author.id in YOUR_USER_IDS
 
 class RoleManager(commands.Cog):
     """Role management commands for bot owner"""
