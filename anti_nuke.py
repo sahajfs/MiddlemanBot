@@ -219,12 +219,11 @@ class AntiNuke(commands.Cog):
             
             # Get audit log to find who deleted it
             await asyncio.sleep(1)  # Wait for audit log
+            deleter = None
             async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.channel_delete):
                 if entry.target.id == channel.id:
                     deleter = entry.user
                     break
-            else:
-                deleter = None
             
             # Check if deleter has owner role
             if deleter:
@@ -245,7 +244,8 @@ class AntiNuke(commands.Cog):
             
         except Exception as e:
             logger.error(f"Error restoring channel: {e}")
-          async def restore_channel(self, guild: discord.Guild, backup: dict, old_channel_id: int):
+    
+    async def restore_channel(self, guild: discord.Guild, backup: dict, old_channel_id: int):
         """Restore a deleted channel from backup"""
         try:
             # Parse permission overwrites
