@@ -383,6 +383,119 @@ class RoleManager(commands.Cog):
         Usage: $rolemass Admin or $rolemass "Member"
         """
         await ctx.message.delete()
+
+        @commands.command(name="rolestrip", aliases=["stripall", "removeallroles"])
+@commands.guild_only()
+@commands.check(is_owner)
+async def rolestrip(self, ctx, member: discord.Member):
+    """
+    Remove ALL roles from a specific user (Owner only)
+    Usage: $rolestrip @user
+    """
+    await ctx.message.delete()
+    
+    # Get bot's highest role
+    bot_member = ctx.guild.get_member(self.bot.user.id)
+    if not bot_member:
+        await ctx.send("❌ Bot member not found.", delete_after=5)
+        return
+    
+    bot_highest_role = bot_member.top_role
+    
+    # Get all roles the user has (excluding @everyone)
+    user_roles = [role for role in member.roles if not role.is_default()]
+    
+    if not user_roles:
+        await ctx.send(f"❌ {member.mention} has no roles to remove.", delete_after=5)
+        return
+    
+    # Separate removable and non-removable roles
+    removable_roles = []
+    non_removable_roles = []
+    
+    for role in user_roles:
+        if role.position < bot_highest_role.position:
+            removable_roles.append(role)
+        else:
+            non_removable_roles.append(role)
+    
+    if not removable_roles:
+        await ctx.send(f"❌ Cannot remove any roles from {member.mention} (all roles are above bot's role).", delete_after=5)
+        return
+    
+    # Confirmation
+    confirm_msg = await ctx.send(
+        f"⚠️ **WARNING**: This will remove **ALL {len(removable_roles)} role(s)** from {member.mention}!\n\n"
+        f"**Roles to be removed:**\n" + 
+        "\n".join([f"• {role.mention}" for role in removable_roles[:10]]) +
+        (f"\n*...and {len(removable_roles) - 10} more*" if len(removable_roles) > 10 else "") +
+        f"\n\nReact with ✅ to confirm or ❌ to cancel."
+    )
+    await confirm_msg.add_reaction("✅")
+    await confirm_msg.add_reaction("❌")
+    
+    def check(reaction, user):
+        return user == ctx.author and str(reaction.emoji) in ["✅", "❌"] and reaction.message.id == confirm_msg.id
+    
+    try:
+        reaction, user = await self.bot.wait_for('reaction_add', timeout=30.0, check=check)
+        
+        if str(reaction.emoji) == "❌":
+            await confirm_msg.edit(content="❌ Operation cancelled.")
+            return
+        
+        # Remove all roles
+        await confirm_msg.edit(content=f"⏳ Removing {len(removable_roles)} role(s) from {member.mention}...")
+        
+        try:
+            await member.remove_roles(*removable_roles, reason=f"All roles stripped by {ctx.author}")
+            
+            embed = discord.Embed(
+                title="✅ All Roles Removed",
+                description=f"Successfully removed **{len(removable_roles)}** role(s) from {member.mention}",
+                color=discord.Color.red(),
+                timestamp=datetime.utcnow()
+            )
+            
+            # Show removed roles (limited to 10)
+            removed_list = "\n".join([f"• {role.name}" for role in removable_roles[:10]])
+            if len(removable_roles) > 10:
+                removed_list += f"\n*...and {len(removable_roles) - 10} more*"
+            
+            embed.add_field(name="Removed Roles", value=removed_list, inline=False)
+            
+            if non_removable_roles:
+                embed.add_field(
+                    name="⚠️ Could Not Remove",
+                    value="\n".join([f"• {role.name}" for role in non_removable_roles]),
+                    inline=False
+                )
+            
+            embed.set_footer(text=f"Executed by {ctx.author.name}", icon_url=ctx.author.display_avatar.url)
+            
+            await confirm_msg.edit(content=None, embed=embed)
+            
+        except discord.Forbidden:
+            await confirm_msg.edit(content="❌ Bot doesn't have permission to remove roles from this user.")
+        except Exception as e:
+            logger.error(f"Error removing roles: {e}")
+            await confirm_msg.edit(content=f"❌ Error removing roles: {str(e)[:100]}")
+    
+    except asyncio.TimeoutError:
+        await confirm_msg.edit(content="❌ Operation cancelled (timeout).")
+
+@rolestrip.error
+async def rolestrip_error(self, ctx, error):
+    """Error handler for rolestrip command"""
+    if isinstance(error, commands.CheckFailure):
+        return
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("❌ Usage: `$rolestrip @user`", delete_after=5)
+    elif isinstance(error, commands.MemberNotFound):
+        await ctx.send("❌ User not found. Please mention a valid user.", delete_after=5)
+    else:
+        logger.error(f"Error in rolestrip: {error}")
+        await ctx.send(f"❌ An error occurred: {str(error)[:100]}", delete_after=5)
         
         # Find the role
         role = None
@@ -479,3 +592,4 @@ class RoleManager(commands.Cog):
 async def setup(bot):
     """Add the cog to the bot"""
     await bot.add_cog(RoleManager(bot))
+
