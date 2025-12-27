@@ -11,7 +11,6 @@ import re
 import signal
 import sys
 from aiohttp import web
-from role_manager import RoleManager
 
 load_dotenv()
 
@@ -278,6 +277,19 @@ async def on_ready():
     
     await db.connect()
     await db.init_db()
+    
+    # Load cogs AFTER database connects
+    try:
+        await bot.load_extension('role_manager')
+        logger.info("✅ Role manager cog loaded")
+    except Exception as e:
+        logger.error(f"Failed to load role manager cog: {e}")
+    
+    try:
+        await bot.load_extension('anti_nuke')
+        logger.info("✅ Anti-nuke cog loaded")
+    except Exception as e:
+        logger.error(f"Failed to load anti-nuke cog: {e}")
     
     for guild in bot.guilds:
         if guild.id != GUILD_ID:
@@ -1589,4 +1601,5 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Fatal error: {e}")
         sys.exit(1)
+
 
