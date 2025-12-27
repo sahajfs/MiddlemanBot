@@ -17,7 +17,8 @@ class Database:
                 self.database_url,
                 min_size=1,
                 max_size=10,
-                command_timeout=60
+                command_timeout=60,
+                statement_cache_size=0  # Fix pgbouncer error
             )
             logger.info("✅ Connected to Supabase")
         except Exception as e:
@@ -28,7 +29,7 @@ class Database:
         """Initialize database tables"""
         try:
             async with self.pool.acquire() as conn:
-                # Create setup_messages table for persistent buttons
+                # Setup messages table
                 await conn.execute("""
                     CREATE TABLE IF NOT EXISTS setup_messages (
                         id SERIAL PRIMARY KEY,
@@ -38,6 +39,74 @@ class Database:
                         created_at TIMESTAMPTZ DEFAULT NOW()
                     )
                 """)
+                
+                # Channel backups table
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS channel_backups (
+                        id SERIAL PRIMARY KEY,
+                        guild_id BIGINT NOT NULL,
+                        channel_id BIGINT NOT NULL UNIQUE,
+                        channel_name TEXT NOT NULL,
+                        channel_type INTEGER NOT NULL,
+                        position INTEGER,
+                        parent_id BIGINT,
+                        topic TEXT,
+                        nsfw BOOLEAN DEFAULT FALSE,
+                        rate_limit_per_user INTEGER DEFAULT 0,
+                        bitrate INTEGER,
+                        user_limit INTEGER,
+                        permission_overwrites TEXT,
+                        created_at TIMESTAMPTZ DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
+                
+                # Role backups table
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS role_backups (
+                        id SERIAL PRIMARY KEY,
+                        guild_id BIGINT NOT NULL,
+                        role_id BIGINT NOT NULL UNIQUE,
+                        role_name TEXT NOT NULL,
+                        color INTEGER,
+                        hoist BOOLEAN DEFAULT FALSE,
+                        position INTEGER,
+                        permissions BIGINT,
+                        mentionable BOOLEAN DEFAULT FALSE,
+                        created_at TIMESTAMPTZ DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
+                
+                # Mention tracker table
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS mention_tracker (
+                        id SERIAL PRIMARY KEY,
+                        guild_id BIGINT NOT NULL,
+                        user_id BIGINT NOT NULL,
+                        mention_time TIMESTAMPTZ DEFAULT NOW(),
+                        action_taken TEXT
+                    )
+                """)
+                
+                # Anti-nuke logs table
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS antinuke_logs (
+                        id SERIAL PRIMARY KEY,
+                        guild_id BIGINT NOT NULL,
+                        action_type TEXT NOT NULL,
+                        target_id BIGINT,
+                        executor_id BIGINT,
+                        details JSONB,
+                        created_at TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
+                
+                # Create indexes
+                await conn.execute("CREATE INDEX IF NOT EXISTS idx_channel_backups_guild ON channel_backups(guild_id)")
+                await conn.execute("CREATE INDEX IF NOT EXISTS idx_mention_tracker_user ON mention_tracker(guild_id, user_id, mention_time)")
+                await conn.execute("CREATE INDEX IF NOT EXISTS idx_antinuke_logs_guild ON antinuke_logs(guild_id, created_at)")
+                
             logger.info("✅ Database initialized")
         except Exception as e:
             logger.error(f"Error initializing database: {e}")
