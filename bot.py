@@ -1583,6 +1583,13 @@ if __name__ == "__main__":
             except Exception as e:
                 logger.error(f"Failed to load role manager cog: {e}")
             
+            # Load anti-nuke cog (ADD THIS)
+            try:
+                await bot.load_extension('anti_nuke')
+                logger.info("✅ Anti-nuke cog loaded")
+            except Exception as e:
+                logger.error(f"Failed to load anti-nuke cog: {e}")
+            
             await start_health_server()
             await bot.start(TOKEN)
     
@@ -1593,4 +1600,3 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Fatal error: {e}")
         sys.exit(1)
-
