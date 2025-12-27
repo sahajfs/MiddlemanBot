@@ -294,3 +294,140 @@ class Database:
         except Exception as e:
             logger.error(f"Database health check failed: {e}")
             return False
+
+# Add these methods to your Database class in database.py
+
+# ==================== ANTI-NUKE: CHANNEL BACKUPS ====================
+
+async def backup_channel(self, guild_id: int, channel_id: int, channel_data: dict):
+    """Backup a channel's configuration"""
+    async with self.pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO channel_backups (
+                guild_id, channel_id, channel_name, channel_type, position,
+                parent_id, topic, nsfw, rate_limit_per_user, bitrate, 
+                user_limit, permission_overwrites
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            ON CONFLICT (channel_id) 
+            DO UPDATE SET 
+                channel_name = $3, position = $5, parent_id = $6,
+                topic = $7, nsfw = $8, rate_limit_per_user = $9,
+                permission_overwrites = $12, updated_at = NOW()
+        """, 
+        guild_id, channel_id, channel_data['name'], channel_data['type'],
+        channel_data['position'], channel_data['parent_id'], channel_data['topic'],
+        channel_data['nsfw'], channel_data['rate_limit_per_user'],
+        channel_data.get('bitrate'), channel_data.get('user_limit'),
+        channel_data['permission_overwrites'])
+
+async def get_channel_backup(self, channel_id: int):
+    """Get channel backup data"""
+    async with self.pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT * FROM channel_backups WHERE channel_id = $1
+        """, channel_id)
+        return dict(row) if row else None
+
+async def get_all_channel_backups(self, guild_id: int):
+    """Get all channel backups for a guild"""
+    async with self.pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT * FROM channel_backups WHERE guild_id = $1
+        """, guild_id)
+        return [dict(row) for row in rows]
+
+async def delete_channel_backup(self, channel_id: int):
+    """Delete a channel backup"""
+    async with self.pool.acquire() as conn:
+        await conn.execute("""
+            DELETE FROM channel_backups WHERE channel_id = $1
+        """, channel_id)
+
+async def clear_guild_channel_backups(self, guild_id: int):
+    """Clear all channel backups for a guild"""
+    async with self.pool.acquire() as conn:
+        await conn.execute("""
+            DELETE FROM channel_backups WHERE guild_id = $1
+        """, guild_id)
+
+# ==================== ANTI-NUKE: ROLE BACKUPS ====================
+
+async def backup_role(self, guild_id: int, role_id: int, role_data: dict):
+    """Backup a role's configuration"""
+    async with self.pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO role_backups (
+                guild_id, role_id, role_name, color, hoist,
+                position, permissions, mentionable
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (role_id)
+            DO UPDATE SET
+                role_name = $3, color = $4, hoist = $5,
+                position = $6, permissions = $7, mentionable = $8,
+                updated_at = NOW()
+        """,
+        guild_id, role_id, role_data['name'], role_data['color'],
+        role_data['hoist'], role_data['position'], role_data['permissions'],
+        role_data['mentionable'])
+
+async def get_all_role_backups(self, guild_id: int):
+    """Get all role backups for a guild"""
+    async with self.pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT * FROM role_backups WHERE guild_id = $1
+        """, guild_id)
+        return [dict(row) for row in rows]
+
+# ==================== ANTI-NUKE: MENTION TRACKING ====================
+
+async def add_mention_record(self, guild_id: int, user_id: int, action_taken: str = None):
+    """Record an @everyone/@here mention"""
+    async with self.pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO mention_tracker (guild_id, user_id, action_taken)
+            VALUES ($1, $2, $3)
+        """, guild_id, user_id, action_taken)
+
+async def get_recent_mentions(self, guild_id: int, user_id: int, minutes: int = 1):
+    """Get recent mentions by a user within X minutes"""
+    async with self.pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT * FROM mention_tracker
+            WHERE guild_id = $1 AND user_id = $2
+            AND mention_time > NOW() - INTERVAL '%s minutes'
+            ORDER BY mention_time DESC
+        """ % minutes, guild_id, user_id)
+        return [dict(row) for row in rows]
+
+async def cleanup_old_mentions(self, days: int = 7):
+    """Clean up old mention records"""
+    async with self.pool.acquire() as conn:
+        await conn.execute("""
+            DELETE FROM mention_tracker
+            WHERE mention_time < NOW() - INTERVAL '%s days'
+        """ % days)
+
+# ==================== ANTI-NUKE: LOGGING ====================
+
+async def log_antinuke_action(self, guild_id: int, action_type: str, 
+                              target_id: int = None, executor_id: int = None, 
+                              details: dict = None):
+    """Log an anti-nuke action"""
+    async with self.pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO antinuke_logs (guild_id, action_type, target_id, executor_id, details)
+            VALUES ($1, $2, $3, $4, $5)
+        """, guild_id, action_type, target_id, executor_id, details)
+
+async def get_antinuke_logs(self, guild_id: int, limit: int = 50):
+    """Get recent anti-nuke logs"""
+    async with self.pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT * FROM antinuke_logs
+            WHERE guild_id = $1
+            ORDER BY created_at DESC
+            LIMIT $2
+        """, guild_id, limit)
+        return [dict(row) for row in rows]
